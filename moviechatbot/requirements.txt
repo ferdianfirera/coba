@@ -1,0 +1,11 @@
+langchain==0.1.17
+langchain-openai
+langchain-qdrant
+langchain-text-splitters
+qdrant-client
+openai
+streamlit
+pandas
+python-dotenv
+tqdm
+kaggle
