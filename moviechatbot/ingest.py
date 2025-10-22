@@ -1,8 +1,11 @@
 import os
 import argparse
+import time
 from dotenv import load_dotenv
 import pandas as pd
 from tqdm.auto import tqdm
+from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import ResponseHandlingException
 
 # LangChain + Qdrant imports
 from langchain_openai import OpenAIEmbeddings
@@ -18,8 +21,7 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY not set.")
-if not QDRANT_URL or not QDRANT_API_KEY:
-    print("⚠️ Warning: QDRANT_URL or QDRANT_API_KEY not set — local preview only.")
+print("⚠️ Using local preview mode.")
 
 def build_documents(df: pd.DataFrame):
     # Normalize column names for flexible detection
@@ -53,7 +55,6 @@ def build_documents(df: pd.DataFrame):
             "poster_link": str(row.get("Poster_Link", "")),
         }
 
-        # Build full content for embedding
         content = f"""Title: {title}
 Year: {meta['released_year']}
 Certificate: {meta['certificate']}
@@ -75,7 +76,8 @@ Overview:
     return texts, metadatas
 
 
-def ingest(csv_path: str, collection_name: str = "movie_collection", chunk_size: int = 800, chunk_overlap: int = 100):
+def ingest(csv_path: str, collection_name: str = "movie_collection",
+           chunk_size: int = 800, chunk_overlap: int = 100, batch_size: int = 20):
     print(f"📖 Reading CSV: {csv_path}")
     df = pd.read_csv(csv_path)
     texts, metadatas = build_documents(df)
@@ -84,13 +86,14 @@ def ingest(csv_path: str, collection_name: str = "movie_collection", chunk_size:
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     docs, doc_metas = [], []
 
-    for text, meta in tqdm(zip(texts, metadatas), total=len(texts)):
+    for text, meta in tqdm(zip(texts, metadatas), total=len(texts), desc="Splitting texts"):
         chunks = text_splitter.split_text(text)
         for i, ch in enumerate(chunks):
             docs.append(ch)
             doc_metas.append({**meta, "chunk": i, "source": "imdb_top_1000"})
 
-    print("🚀 Creating embeddings and upserting to Qdrant...")
+    print(f"🧩 Total chunks to embed: {len(docs)}")
+
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=OPENAI_API_KEY)
 
     if not QDRANT_URL or not QDRANT_API_KEY:
@@ -101,16 +104,41 @@ def ingest(csv_path: str, collection_name: str = "movie_collection", chunk_size:
         print("💾 Saved local_chunks_preview.json (no Qdrant credentials).")
         return
 
-    vectorstore = QdrantVectorStore.from_texts(
-        docs,
-        embedding=embeddings,
-        metadatas=doc_metas,
-        collection_name=collection_name,
-        url=QDRANT_URL,
-        api_key=QDRANT_API_KEY,
-    )
+    client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
-    print(f"🎉 Inserted {len(docs)} chunks into collection `{collection_name}`.")
+    # Check connection
+    try:
+        collections = client.get_collections()
+        print(f"✅ Connected to Qdrant. Existing collections: {[c.name for c in collections.collections]}")
+    except Exception as e:
+        print(f"❌ Failed to connect to Qdrant: {e}")
+        return
+
+    print("🚀 Uploading in batches...")
+    for i in tqdm(range(0, len(docs), batch_size), desc="Uploading batches"):
+        batch_docs = docs[i:i + batch_size]
+        batch_metas = doc_metas[i:i + batch_size]
+        retries = 3
+        for attempt in range(retries):
+            try:
+                QdrantVectorStore.from_texts(
+                    texts=batch_docs,
+                    embedding=embeddings,
+                    metadatas=batch_metas,
+                    collection_name=collection_name,
+                    url=QDRANT_URL,
+                    api_key=QDRANT_API_KEY,
+                )
+                print(f"✅ Uploaded batch {i // batch_size + 1}/{len(docs)//batch_size + 1}")
+                break
+            except ResponseHandlingException as e:
+                print(f"⚠️ Timeout during batch {i // batch_size + 1}, retrying ({attempt+1}/{retries})...")
+                time.sleep(3)
+            except Exception as e:
+                print(f"❌ Error in batch {i // batch_size + 1}: {e}")
+                break
+
+    print(f"🎉 Completed ingestion into `{collection_name}` ({len(docs)} chunks total).")
 
 
 if __name__ == "__main__":

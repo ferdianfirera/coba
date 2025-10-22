@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langchain.chains import ConversationalRetrievalChain
 from langchain.prompts import PromptTemplate
+from langchain.memory import ConversationBufferMemory
 
 # ---- secrets (works both locally via .env and on Streamlit Cloud via st.secrets) ----
 if "QDRANT_URL" in st.secrets:
@@ -60,9 +61,16 @@ custom_prompt = PromptTemplate(
     )
 )
 
+# ---- Memory (this makes the chatbot remember conversation!) ----
+memory = ConversationBufferMemory(
+    memory_key="chat_history",
+    return_messages=True,
+)
+
 qa_chain = ConversationalRetrievalChain.from_llm(
     llm=llm,
     retriever=retriever,
+    memory=memory,
     return_source_documents=True,
     combine_docs_chain_kwargs={"prompt": custom_prompt}
 )
@@ -70,7 +78,7 @@ qa_chain = ConversationalRetrievalChain.from_llm(
 
 # ---- Streamlit UI ----
 st.set_page_config(page_title="MovieMaster — IMDB RAG Chat", layout="wide")
-st.title("🎬 MovieMaster — AI Movie Companion")
+st.title("🎬 Cinemabot — AI Movie Companion")
 
 if "history" not in st.session_state:
     st.session_state.history = []  # list of (user, bot) tuples
